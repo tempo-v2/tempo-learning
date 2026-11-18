@@ -19,6 +19,22 @@ pub struct DailyLearning {
 impl DailyLearning {
     /// Acknowledge a new or revised answer and schedule its first blind test.
     pub fn teach(prior: &LearningState, at: StudyTime) -> Result<LearningState, LearningError> {
+        Self::introduce_ungraded(prior, at, add_days(at.day, 1)?)
+    }
+
+    /// Entering a personal tactic is an ungraded introduction with immediate recall due.
+    pub fn introduce_capture(
+        prior: &LearningState,
+        at: StudyTime,
+    ) -> Result<LearningState, LearningError> {
+        Self::introduce_ungraded(prior, at, at.day)
+    }
+
+    fn introduce_ungraded(
+        prior: &LearningState,
+        at: StudyTime,
+        due: tempo_types::StudyDay,
+    ) -> Result<LearningState, LearningError> {
         if prior.introduced || prior.taught_at.is_some() || prior.scheduler_memory.is_some() {
             return Err(LearningError::InvalidLearningState);
         }
@@ -27,7 +43,7 @@ impl DailyLearning {
         state.introduced = true;
         state.first_introduced.get_or_insert(at.day);
         state.taught_at = Some(at);
-        state.due = Some(add_days(at.day, 1)?);
+        state.due = Some(due);
         Ok(state)
     }
 

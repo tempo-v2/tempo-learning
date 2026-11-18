@@ -18,7 +18,7 @@ pub struct LearningState {
     /// Lifetime first introduction, retained across content changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_introduced: Option<StudyDay>,
-    /// Explicit instruction accepted for the current version.
+    /// Ungraded introduction of the current version by teaching or personal capture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taught_at: Option<StudyTime>,
     /// Last actual scheduled test for this version.
