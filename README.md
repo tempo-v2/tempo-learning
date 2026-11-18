@@ -37,7 +37,21 @@ The private `calendar.rs` helper performs checked day arithmetic. It does not re
 a clock. The scheduler and the daily policy both need that arithmetic, but neither
 needs a general-purpose utility or application-context object.
 
-## Follow one assessment
+## Production Daily Study
+
+Use [`DailyLearning`](src/daily_learning.rs) for the installed FSRS profile.
+`assess_game` accepts a validated Game Again and returns the model update,
+corrective obligation and preserved human Test cadence as one transition.
+`apply_game_again` is its model hook. `assess_test` uses the issued attempt's
+miss revision and time to advance a correction. `repair` accepts ungraded
+guided work, and `Correction::remaining_recalls` projects the remaining recalls.
+Portable legacy requests enter through `DailyLearning::restore_portable` for
+compatibility without a new grade.
+
+`StandardLearning` and the fixed-interval examples below describe the standard
+and fixture profiles.
+
+## Follow one standard-profile assessment
 
 1. The application loads a `LearningState` for the target. New targets start at
    `LearningState::default()`: unintroduced, no due date, and no scheduler memory.
@@ -56,7 +70,7 @@ A grade describes performance. An effect describes its learning consequence.
 Learning does not decide whether a chess answer is correct. The scheduler does not
 decide whether an extra practice attempt deserves another daily credit.
 
-## Policy outcomes
+## Standard-profile outcomes
 
 | Accepted input and context | Effect and proposed state |
 | --- | --- |
@@ -85,8 +99,7 @@ configuration captured for export/restore compatibility. Store preserves their
 bytes; Queue, Study, and UI do not decode them. The selected algorithm validates
 memory identity, schema, and payload. Unknown or malformed data is rejected
 rather than silently reset. Restore also compares exact settings before mutation.
-A future FSRS adapter needs its own codec/validation and migration decisions;
-the envelopes do not make different algorithms' state interchangeable.
+Each algorithm uses its own codec and validation.
 
 The current `FixedIntervalScheduler` is a fixture, not FSRS. Its default Good
 interval is three days. Algorithm identity is `fixed_interval`, schema 1;
