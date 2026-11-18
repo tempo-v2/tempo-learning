@@ -1,7 +1,7 @@
 //! Durable learning facts for one target, independent of its content family.
 use crate::SchedulerMemory;
 use serde::{Deserialize, Serialize};
-use tempo_types::{MissRevision, StudyDay};
+use tempo_types::{MissRevision, StudyDay, StudyTime};
 
 /// Load one of these before applying an assessment, and persist the replacement
 /// state returned in [`crate::Transition`]. Target identity belongs to the caller's
@@ -13,9 +13,18 @@ use tempo_types::{MissRevision, StudyDay};
 /// literal alone does not establish that a persisted state is coherent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LearningState {
-    /// Whether any accepted assessment has introduced this target.
+    /// Whether the current version has been introduced.
     pub introduced: bool,
-    /// Scheduled study day; introduced targets must have one.
+    /// Lifetime first introduction, retained across content changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_introduced: Option<StudyDay>,
+    /// Explicit instruction accepted for the current version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taught_at: Option<StudyTime>,
+    /// Last actual scheduled test for this version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_review_at: Option<StudyTime>,
+    /// Scheduled test day for the current version.
     pub due: Option<StudyDay>,
     /// Outstanding repeat obligation; Queue reads a copied fact to select repeats.
     pub repeat_pending: bool,

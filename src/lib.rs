@@ -45,6 +45,7 @@
 mod assessment_input;
 mod assessment_source;
 mod calendar;
+mod daily_learning;
 mod fixed_interval_scheduler;
 mod learning_effect;
 mod learning_error;
@@ -59,6 +60,7 @@ mod transition;
 
 pub use assessment_input::AssessmentInput;
 pub use assessment_source::AssessmentSource;
+pub use daily_learning::DailyLearning;
 pub use fixed_interval_scheduler::FixedIntervalScheduler;
 pub use learning_effect::LearningEffect;
 pub use learning_error::LearningError;
