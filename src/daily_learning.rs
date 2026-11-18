@@ -4,7 +4,7 @@ use crate::{
     LearningState, SchedulerMemory, SchedulerSettings, Transition, calendar::add_days,
 };
 use fsrs::{DEFAULT_PARAMETERS, FSRS, MemoryState};
-use tempo_types::{Grade, StudyTime};
+use tempo_types::{ContentVersion, Grade, StudyTime};
 
 const ALGORITHM: &str = "fsrs-6.6.2";
 const MEMORY_FORMAT: u32 = 1;
@@ -43,6 +43,7 @@ impl DailyLearning {
         state.introduced = true;
         state.first_introduced.get_or_insert(at.day);
         state.taught_at = Some(at);
+        state.game_teaching_relevance = false;
         state.due = Some(due);
         Ok(state)
     }
@@ -51,8 +52,29 @@ impl DailyLearning {
     pub fn changed_answer(prior: &LearningState) -> LearningState {
         LearningState {
             first_introduced: prior.first_introduced,
+            last_graded_day: prior
+                .last_graded_day
+                .or(prior.last_review_at.map(|at| at.day)),
             ..LearningState::default()
         }
+    }
+
+    /// Accept the first assessment of an ordinary daily Test using its saved issue time.
+    pub fn assess_test(
+        policy: &dyn LearningPolicy,
+        prior: &LearningState,
+        input: &AssessmentInput,
+        version: ContentVersion,
+        issued_at: StudyTime,
+    ) -> Result<Transition, LearningError> {
+        if !prior.can_accept_daily_test(input.accepted_at.day) {
+            return Err(LearningError::DailyTestAlreadyAccepted);
+        }
+        let mut transition = policy.apply(prior, input)?;
+        transition
+            .state
+            .record_assessed_test(version, issued_at, input.accepted_at)?;
+        Ok(transition)
     }
 }
 
@@ -81,6 +103,23 @@ impl LearningPolicy for DailyLearning {
             || (state.introduced && state.first_introduced.is_none())
             || reviewed != (state.scheduled_reviews != 0)
             || reviewed != state.scheduler_memory.is_some()
+            || (state.game_teaching_relevance && state.introduced)
+            || state.last_assessed_test_issue_ms.is_some_and(|issue| {
+                state
+                    .last_review_at
+                    .is_none_or(|review| issue > review.unix_ms)
+            })
+            || state
+                .last_graded_day
+                .zip(state.last_review_at)
+                .is_some_and(|(day, review)| day != review.day)
+            || state.game_review.is_some_and(|request| {
+                state.taught_at.is_none_or(|taught| {
+                    request.occurred_by_ms <= taught.unix_ms || request.actionable_day <= taught.day
+                }) || state
+                    .last_assessed_test_issue_ms
+                    .is_some_and(|issue| issue > request.occurred_by_ms)
+            })
             || state.repeat_pending
             || state.last_credit_day.is_some()
             || state.last_miss_day.is_some()

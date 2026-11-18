@@ -1,5 +1,5 @@
 //! Durable learning facts for one target, independent of its content family.
-use crate::SchedulerMemory;
+use crate::{GameReview, SchedulerMemory};
 use serde::{Deserialize, Serialize};
 use tempo_types::{MissRevision, StudyDay, StudyTime};
 
@@ -24,6 +24,18 @@ pub struct LearningState {
     /// Last actual scheduled test for this version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_review_at: Option<StudyTime>,
+    /// Newest issuance covered by an accepted Test of this answer version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_assessed_test_issue_ms: Option<u64>,
+    /// Latest Test acceptance day across answer versions of this target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_graded_day: Option<StudyDay>,
+    /// The one coalesced review obligation for this answer version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_review: Option<GameReview>,
+    /// This unseen answer was encountered in a deviation. Teaching consumes relevance.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub game_teaching_relevance: bool,
     /// Scheduled test day for the current version.
     pub due: Option<StudyDay>,
     /// Outstanding repeat obligation; Queue reads a copied fact to select repeats.
@@ -38,6 +50,10 @@ pub struct LearningState {
     pub scheduled_reviews: u64,
     /// Algorithm-owned state retained with the due date, or None before scheduling.
     pub scheduler_memory: Option<SchedulerMemory>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[cfg(test)]

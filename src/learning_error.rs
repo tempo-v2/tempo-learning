@@ -30,6 +30,8 @@ pub enum LearningError {
     InvalidSchedule,
     /// Persisted introduction, due, miss, review, or memory facts are inconsistent.
     InvalidLearningState,
+    /// This target already received its ordinary Test assessment on that study day.
+    DailyTestAlreadyAccepted,
 }
 impl fmt::Display for LearningError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
