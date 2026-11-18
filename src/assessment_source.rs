@@ -12,6 +12,14 @@ use tempo_types::{AttemptId, EventId, MissRevision};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AssessmentSource {
+    /// A combined repertoire miss in a completed game.
+    Game {
+        source: String,
+        game_id: String,
+        played_date: Option<String>,
+        started_at_ms: Option<u64>,
+        ended_at_ms: Option<u64>,
+    },
     /// A terminal grade from a human exercise attempt.
     Human {
         /// Provenance identity; the application guards against duplicate acceptance.

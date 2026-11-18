@@ -77,4 +77,4 @@ pub use transition::Transition;
 mod test_support;
 
 mod game_review;
-pub use game_review::{GameMiss, GameReview, GameReviewEffect};
+pub use game_review::{Correction, GameReview, GameReviewEffect};

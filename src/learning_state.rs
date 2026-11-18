@@ -1,5 +1,5 @@
 //! Durable learning facts for one target, independent of its content family.
-use crate::{GameReview, SchedulerMemory};
+use crate::{Correction, GameReview, SchedulerMemory};
 use serde::{Deserialize, Serialize};
 use tempo_types::{MissRevision, StudyDay, StudyTime};
 
@@ -21,7 +21,7 @@ pub struct LearningState {
     /// Ungraded introduction of the current version by teaching or personal capture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taught_at: Option<StudyTime>,
-    /// Last actual scheduled test for this version.
+    /// Last model assessment for this version, including Game Again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_review_at: Option<StudyTime>,
     /// Newest issuance covered by an accepted Test of this answer version.
@@ -36,6 +36,11 @@ pub struct LearningState {
     /// This unseen answer was encountered in a deviation. Teaching consumes relevance.
     #[serde(default, skip_serializing_if = "is_false")]
     pub game_teaching_relevance: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction: Option<Correction>,
+    /// A first introduction through game repair is outside the ordinary quota.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub game_introduction: bool,
     /// Scheduled test day for the current version.
     pub due: Option<StudyDay>,
     /// Outstanding repeat obligation; Queue reads a copied fact to select repeats.

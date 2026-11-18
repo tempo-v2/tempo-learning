@@ -113,6 +113,7 @@ impl<S: Scheduler> LearningPolicy for StandardLearning<S> {
                     });
                 }
             }
+            AssessmentSource::Game { .. } => return Err(LearningError::InvalidLearningState),
             AssessmentSource::External { .. } => {
                 return Err(LearningError::ExternalGoodUnsupported);
             }

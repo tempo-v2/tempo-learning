@@ -20,6 +20,14 @@ pub trait LearningPolicy {
         prior: &LearningState,
         input: &AssessmentInput,
     ) -> Result<Transition, LearningError>;
+    /// Production daily model transition for a validated game failure.
+    fn apply_game_again(
+        &self,
+        _prior: &LearningState,
+        _input: &AssessmentInput,
+    ) -> Result<Transition, LearningError> {
+        Err(LearningError::InvalidLearningState)
+    }
 }
 
 #[cfg(test)]

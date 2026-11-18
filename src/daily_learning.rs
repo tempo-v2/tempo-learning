@@ -1,10 +1,10 @@
 //! Opening lessons and scheduled tests use distinct learning transitions.
 use crate::{
-    AssessmentInput, AssessmentSource, LearningEffect, LearningError, LearningPolicy,
+    AssessmentInput, AssessmentSource, Correction, LearningEffect, LearningError, LearningPolicy,
     LearningState, SchedulerMemory, SchedulerSettings, Transition, calendar::add_days,
 };
 use fsrs::{DEFAULT_PARAMETERS, FSRS, MemoryState};
-use tempo_types::{ContentVersion, Grade, StudyTime};
+use tempo_types::{ContentVersion, Grade, MissRevision, StudyTime};
 
 const ALGORITHM: &str = "fsrs-6.6.2";
 const MEMORY_FORMAT: u32 = 1;
@@ -52,9 +52,9 @@ impl DailyLearning {
     pub fn changed_answer(prior: &LearningState) -> LearningState {
         LearningState {
             first_introduced: prior.first_introduced,
-            last_graded_day: prior
-                .last_graded_day
-                .or(prior.last_review_at.map(|at| at.day)),
+            last_graded_day: prior.last_human_test_day(),
+            game_introduction: prior.game_introduction,
+            miss_revision: prior.miss_revision,
             ..LearningState::default()
         }
     }
@@ -67,14 +67,119 @@ impl DailyLearning {
         version: ContentVersion,
         issued_at: StudyTime,
     ) -> Result<Transition, LearningError> {
+        let AssessmentSource::Human {
+            issued_miss_revision,
+            ..
+        } = input.source
+        else {
+            return Err(LearningError::InvalidLearningState);
+        };
+        if input.grade == Grade::Good && issued_miss_revision != prior.miss_revision {
+            return Ok(Transition {
+                state: prior.clone(),
+                effect: LearningEffect::StalePositiveIgnored,
+            });
+        }
         if !prior.can_accept_daily_test(input.accepted_at.day) {
             return Err(LearningError::DailyTestAlreadyAccepted);
         }
         let mut transition = policy.apply(prior, input)?;
         transition
             .state
-            .record_assessed_test(version, issued_at, input.accepted_at)?;
+            .record_assessed_test(issued_at, input.accepted_at)?;
+        if let Some(mut correction) = prior.correction.clone() {
+            match input.grade {
+                Grade::Again => {
+                    Self::start_correction(
+                        &mut transition.state,
+                        version,
+                        correction.previous_move,
+                        false,
+                    )?;
+                }
+                Grade::Good => {
+                    if correction
+                        .next_recall_day
+                        .is_none_or(|day| day > input.accepted_at.day)
+                    {
+                        return Err(LearningError::InvalidLearningState);
+                    }
+                    correction.clean_recalls += 1;
+                    correction.next_recall_day = Some(add_days(input.accepted_at.day, 1)?);
+                    transition.state.correction =
+                        (correction.clean_recalls < 3).then_some(correction);
+                }
+            }
+        }
         Ok(transition)
+    }
+
+    pub fn assess_game(
+        policy: &dyn LearningPolicy,
+        prior: &LearningState,
+        input: &AssessmentInput,
+        version: ContentVersion,
+        previous_move: Option<String>,
+    ) -> Result<Transition, LearningError> {
+        if !matches!(input.source, AssessmentSource::Game { .. }) || input.grade != Grade::Again {
+            return Err(LearningError::InvalidLearningState);
+        }
+        let mut transition = policy.apply_game_again(prior, input)?;
+        transition.state.last_graded_day = prior.last_human_test_day();
+        transition.state.game_introduction |= prior.first_introduced.is_none();
+        let awaiting_introduction = !prior.introduced
+            || prior
+                .correction
+                .as_ref()
+                .is_some_and(|correction| correction.awaiting_introduction);
+        Self::start_correction(
+            &mut transition.state,
+            version,
+            previous_move,
+            awaiting_introduction,
+        )?;
+        transition.effect = LearningEffect::MissRecorded;
+        Ok(transition)
+    }
+
+    fn start_correction(
+        state: &mut LearningState,
+        answer_version: ContentVersion,
+        previous_move: Option<String>,
+        awaiting_introduction: bool,
+    ) -> Result<(), LearningError> {
+        state.miss_revision.0 = state
+            .miss_revision
+            .0
+            .checked_add(1)
+            .ok_or(LearningError::CounterOverflow)?;
+        state.correction = Some(Correction {
+            answer_version,
+            clean_recalls: 0,
+            next_recall_day: None,
+            previous_move,
+            awaiting_introduction,
+        });
+        Ok(())
+    }
+
+    pub fn repair(
+        prior: &LearningState,
+        version: ContentVersion,
+        revision: MissRevision,
+        at: StudyTime,
+    ) -> Result<LearningState, LearningError> {
+        let mut state = prior.clone();
+        if revision == prior.miss_revision
+            && let Some(correction) = &mut state.correction
+            && correction.answer_version == version
+            && correction.next_recall_day.is_none()
+        {
+            check_time(prior, at)?;
+            correction.next_recall_day = Some(add_days(at.day, 1)?);
+            correction.awaiting_introduction = false;
+        }
+        Ok(state)
     }
 }
 
@@ -103,7 +208,6 @@ impl LearningPolicy for DailyLearning {
             || (state.introduced && state.first_introduced.is_none())
             || reviewed != (state.scheduled_reviews != 0)
             || reviewed != state.scheduler_memory.is_some()
-            || (state.game_teaching_relevance && state.introduced)
             || state.last_assessed_test_issue_ms.is_some_and(|issue| {
                 state
                     .last_review_at
@@ -112,18 +216,17 @@ impl LearningPolicy for DailyLearning {
             || state
                 .last_graded_day
                 .zip(state.last_review_at)
-                .is_some_and(|(day, review)| day != review.day)
-            || state.game_review.is_some_and(|request| {
-                state.taught_at.is_none_or(|taught| {
-                    request.occurred_by_ms <= taught.unix_ms || request.actionable_day <= taught.day
-                }) || state
-                    .last_assessed_test_issue_ms
-                    .is_some_and(|issue| issue > request.occurred_by_ms)
+                .is_some_and(|(day, review)| day > review.day)
+            || state.correction.as_ref().is_some_and(|correction| {
+                !reviewed
+                    || state.miss_revision.0 == 0
+                    || correction.clean_recalls >= 3
+                    || (correction.next_recall_day.is_none() && correction.clean_recalls != 0)
+                    || (correction.awaiting_introduction && correction.next_recall_day.is_some())
             })
             || state.repeat_pending
             || state.last_credit_day.is_some()
             || state.last_miss_day.is_some()
-            || state.miss_revision.0 != 0
         {
             return Err(LearningError::InvalidLearningState);
         }
@@ -138,10 +241,31 @@ impl LearningPolicy for DailyLearning {
         prior: &LearningState,
         input: &AssessmentInput,
     ) -> Result<Transition, LearningError> {
-        self.validate_state(prior)?;
         if !matches!(input.source, AssessmentSource::Human { .. }) {
             return Err(LearningError::InvalidLearningState);
         }
+        self.assess_model(prior, input)
+    }
+
+    fn apply_game_again(
+        &self,
+        prior: &LearningState,
+        input: &AssessmentInput,
+    ) -> Result<Transition, LearningError> {
+        if !matches!(input.source, AssessmentSource::Game { .. }) || input.grade != Grade::Again {
+            return Err(LearningError::InvalidLearningState);
+        }
+        self.assess_model(prior, input)
+    }
+}
+
+impl DailyLearning {
+    fn assess_model(
+        &self,
+        prior: &LearningState,
+        input: &AssessmentInput,
+    ) -> Result<Transition, LearningError> {
+        self.validate_state(prior)?;
         let at = input.accepted_at;
         check_time(prior, at)?;
         let elapsed = prior
