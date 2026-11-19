@@ -11,6 +11,16 @@ pub struct GameReview {
     pub actionable_day: StudyDay,
 }
 
+/// A portable legacy obligation whose saved facts do not identify a raw game.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoredGameObligation {
+    Review(GameReview),
+    Teaching,
+}
+
+pub(crate) const CORRECTIVE_RECALLS: u8 = 3;
+
 /// The active answer version's corrective sequence. A missing recall day
 /// means the learner still needs to reproduce the shown move.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +30,12 @@ pub struct Correction {
     pub awaiting_introduction: bool,
     pub next_recall_day: Option<StudyDay>,
     pub previous_move: Option<String>,
+}
+
+impl Correction {
+    pub fn remaining_recalls(&self) -> u8 {
+        CORRECTIVE_RECALLS.saturating_sub(self.clean_recalls)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

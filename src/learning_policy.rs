@@ -20,7 +20,8 @@ pub trait LearningPolicy {
         prior: &LearningState,
         input: &AssessmentInput,
     ) -> Result<Transition, LearningError>;
-    /// Production daily model transition for a validated game failure.
+    /// Model-only hook for [`crate::DailyLearning::assess_game`].
+    /// The production caller uses that complete transition to retain correction and cadence.
     fn apply_game_again(
         &self,
         _prior: &LearningState,

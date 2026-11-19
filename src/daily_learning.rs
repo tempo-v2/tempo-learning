@@ -1,7 +1,8 @@
 //! Opening lessons and scheduled tests use distinct learning transitions.
 use crate::{
     AssessmentInput, AssessmentSource, Correction, LearningEffect, LearningError, LearningPolicy,
-    LearningState, SchedulerMemory, SchedulerSettings, Transition, calendar::add_days,
+    LearningState, RestoredGameObligation, SchedulerMemory, SchedulerSettings, Transition,
+    calendar::add_days, game_review::CORRECTIVE_RECALLS,
 };
 use fsrs::{DEFAULT_PARAMETERS, FSRS, MemoryState};
 use tempo_types::{ContentVersion, Grade, MissRevision, StudyTime};
@@ -44,6 +45,9 @@ impl DailyLearning {
         state.first_introduced.get_or_insert(at.day);
         state.taught_at = Some(at);
         state.game_teaching_relevance = false;
+        if state.restored_game_obligation == Some(RestoredGameObligation::Teaching) {
+            state.restored_game_obligation = None;
+        }
         state.due = Some(due);
         Ok(state)
     }
@@ -57,6 +61,39 @@ impl DailyLearning {
             miss_revision: prior.miss_revision,
             ..LearningState::default()
         }
+    }
+
+    /// Recover the old one-Test or teaching-priority obligation from a portable
+    /// snapshot. A complete corrective sequence already covers the pending request.
+    /// Use only for portable data, where the original game cannot be replayed.
+    pub fn restore_portable(
+        state: &mut LearningState,
+        version: ContentVersion,
+    ) -> Result<(), LearningError> {
+        let legacy = match (state.game_review, state.game_teaching_relevance) {
+            (Some(review), false) => Some(RestoredGameObligation::Review(review)),
+            (None, true) => Some(RestoredGameObligation::Teaching),
+            (None, false) => None,
+            (Some(_), true) => return Err(LearningError::InvalidLearningState),
+        };
+        if matches!(state.restored_game_obligation.or(legacy),
+            Some(RestoredGameObligation::Review(review)) if review.answer_version != version)
+        {
+            return Err(LearningError::InvalidLearningState);
+        }
+        if let Some(obligation) = legacy {
+            if state.restored_game_obligation.is_some()
+                || !valid_restored_obligation(state, obligation)
+            {
+                return Err(LearningError::InvalidLearningState);
+            }
+            if state.correction.is_none() {
+                state.restored_game_obligation = Some(obligation);
+            }
+            state.game_review = None;
+            state.game_teaching_relevance = false;
+        }
+        Ok(())
     }
 
     /// Accept the first assessment of an ordinary daily Test using its saved issue time.
@@ -87,6 +124,15 @@ impl DailyLearning {
         transition
             .state
             .record_assessed_test(issued_at, input.accepted_at)?;
+        if let Some(RestoredGameObligation::Review(review)) =
+            &mut transition.state.restored_game_obligation
+        {
+            if review.answer_version != version || issued_at.unix_ms > review.occurred_by_ms {
+                transition.state.restored_game_obligation = None;
+            } else {
+                review.actionable_day = add_days(input.accepted_at.day, 1)?;
+            }
+        }
         if let Some(mut correction) = prior.correction.clone() {
             match input.grade {
                 Grade::Again => {
@@ -107,13 +153,14 @@ impl DailyLearning {
                     correction.clean_recalls += 1;
                     correction.next_recall_day = Some(add_days(input.accepted_at.day, 1)?);
                     transition.state.correction =
-                        (correction.clean_recalls < 3).then_some(correction);
+                        (correction.remaining_recalls() > 0).then_some(correction);
                 }
             }
         }
         Ok(transition)
     }
 
+    /// Production Game Again, including the corrective obligation and human-Test cadence.
     pub fn assess_game(
         policy: &dyn LearningPolicy,
         prior: &LearningState,
@@ -125,6 +172,7 @@ impl DailyLearning {
             return Err(LearningError::InvalidLearningState);
         }
         let mut transition = policy.apply_game_again(prior, input)?;
+        transition.state.restored_game_obligation = None;
         transition.state.last_graded_day = prior.last_human_test_day();
         transition.state.game_introduction |= prior.first_introduced.is_none();
         let awaiting_introduction = !prior.introduced
@@ -220,9 +268,16 @@ impl LearningPolicy for DailyLearning {
             || state.correction.as_ref().is_some_and(|correction| {
                 !reviewed
                     || state.miss_revision.0 == 0
-                    || correction.clean_recalls >= 3
+                    || correction.clean_recalls >= CORRECTIVE_RECALLS
+                    || correction
+                        .next_recall_day
+                        .zip(state.last_review_at)
+                        .is_some_and(|(day, review)| day <= review.day)
                     || (correction.next_recall_day.is_none() && correction.clean_recalls != 0)
                     || (correction.awaiting_introduction && correction.next_recall_day.is_some())
+            })
+            || state.restored_game_obligation.is_some_and(|obligation| {
+                state.correction.is_some() || !valid_restored_obligation(state, obligation)
             })
             || state.repeat_pending
             || state.last_credit_day.is_some()
@@ -312,6 +367,19 @@ impl DailyLearning {
             state,
             effect: LearningEffect::ScheduleAdvanced,
         })
+    }
+}
+
+fn valid_restored_obligation(state: &LearningState, obligation: RestoredGameObligation) -> bool {
+    match obligation {
+        RestoredGameObligation::Review(review) => {
+            state.taught_at.is_some_and(|taught| {
+                review.occurred_by_ms > taught.unix_ms && review.actionable_day > taught.day
+            }) && state
+                .last_assessed_test_issue_ms
+                .is_none_or(|issue| issue <= review.occurred_by_ms)
+        }
+        RestoredGameObligation::Teaching => !state.introduced || state.correction.is_some(),
     }
 }
 
