@@ -134,3 +134,18 @@ checks atomic commit, replay, and restore equivalence. The exact Tempo manifest
 dependency is unchanged; local workspace patches resolve this unreleased scaffold.
 See `.planning/ARCHITECTURE.md` and `.planning/INTERFACES.md` for component ownership
 and cross-repository checks.
+
+
+## Required immediate recalls
+
+`LearningState::immediate_recall_mode(version, today)` is a pure projection for an
+explicit missed-game recall request. It returns Test only when the existing daily
+availability allows a due or requested Test; otherwise it returns Practice. This
+lets Queue present a missed tactic immediately without granting another scheduled
+assessment on the same day or moving a future schedule forward.
+
+A newly generated puzzle first uses `DailyLearning::introduce_capture`, the existing
+ungraded introduction due today. The application commits that transition with the
+new content and request. Existing puzzle Learning is preserved. Store owns event
+uniqueness and request fulfillment; Queue owns precedence; Learning does not fetch
+games, inspect detector labels or invent a human grade from a game observation.
