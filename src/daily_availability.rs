@@ -1,6 +1,6 @@
 //! Learning facts used to select an activity for the current answer version.
 use crate::{LearningState, RestoredGameObligation};
-use tempo_types::{ContentVersion, StudyDay};
+use tempo_types::{ContentVersion, Grade, StudyDay};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DailyObligation {
@@ -27,6 +27,31 @@ pub struct DailyAvailability {
     pub obligation: DailyObligation,
     pub action: DailyAction,
     pub corrective_recalls_remaining: u8,
+}
+
+/// Learning's assessment of a current repertoire answer for connected Study.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepertoireRecall {
+    Standalone,
+    Familiar,
+    Reviewable,
+}
+
+impl DailyAvailability {
+    /// Supply the last applied human Test grade for this answer version, if known.
+    /// Queue still determines whether independently due work can be selected.
+    pub fn repertoire_recall(&self, last_test: Option<Grade>, today: StudyDay) -> RepertoireRecall {
+        if self.obligation != DailyObligation::None || last_test == Some(Grade::Again) {
+            return RepertoireRecall::Standalone;
+        }
+        if self.introduced_this_version
+            && last_test == Some(Grade::Good)
+            && self.scheduled_due.is_none_or(|due| due > today)
+        {
+            return RepertoireRecall::Familiar;
+        }
+        RepertoireRecall::Reviewable
+    }
 }
 
 impl LearningState {
