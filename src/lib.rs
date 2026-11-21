@@ -61,7 +61,7 @@ mod transition;
 
 pub use assessment_input::AssessmentInput;
 pub use assessment_source::AssessmentSource;
-pub use daily_availability::{DailyAction, DailyAvailability, DailyObligation};
+pub use daily_availability::{DailyAction, DailyAvailability, DailyObligation, RepertoireRecall};
 pub use daily_learning::DailyLearning;
 pub use fixed_interval_scheduler::FixedIntervalScheduler;
 pub use learning_effect::LearningEffect;
