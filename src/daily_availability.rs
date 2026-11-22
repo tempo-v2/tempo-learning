@@ -56,6 +56,35 @@ impl DailyAvailability {
 }
 
 impl LearningState {
+    /// Project ordinary current-version Study facts and human corrections.
+    /// Older Games obligations are kept in persisted Learning but do not
+    /// provide work or override the ordinary saved schedule in a prepared plan.
+    pub fn prepared_availability(
+        &self,
+        answer_version: ContentVersion,
+        today: StudyDay,
+    ) -> DailyAvailability {
+        let human_correction = self.correction.as_ref().is_some_and(|correction| {
+            correction.answer_version == answer_version
+                && correction.lifecycle == CorrectionLifecycle::HumanTest
+        });
+        let (obligation, action) = if human_correction {
+            (DailyObligation::HumanCorrection, DailyAction::Repair)
+        } else {
+            (DailyObligation::None, DailyAction::None)
+        };
+        DailyAvailability {
+            introduced_this_version: self.introduced,
+            first_introduced: self.first_introduced,
+            scheduled_due: self
+                .due
+                .filter(|_| !human_correction && self.can_accept_daily_test(today)),
+            obligation,
+            action,
+            corrective_recalls_remaining: 0,
+        }
+    }
+
     /// Read availability without changing any scheduling, cadence or correction state.
     pub fn daily_availability(
         &self,
@@ -186,6 +215,62 @@ mod tests {
         assert_eq!(
             state.daily_availability(version, StudyDay(4)).action,
             DailyAction::Repair
+        );
+    }
+
+    #[test]
+    fn prepared_availability_preserves_saved_due_without_a_games_ladder() {
+        let version = ContentVersion(1);
+        let today = StudyDay(9);
+        let mut learning = LearningState {
+            introduced: true,
+            first_introduced: Some(StudyDay(5)),
+            due: Some(today),
+            correction: Some(Correction {
+                lifecycle: CorrectionLifecycle::LegacyGame,
+                answer_version: version,
+                clean_recalls: 0,
+                awaiting_introduction: false,
+                next_recall_day: Some(StudyDay(10)),
+                previous_move: None,
+            }),
+            ..LearningState::default()
+        };
+        let before = learning.clone();
+        let prepared = learning.prepared_availability(version, today);
+        assert_eq!(prepared.obligation, DailyObligation::None);
+        assert_eq!(prepared.scheduled_due, Some(today));
+        assert!(prepared.introduced_this_version);
+        assert_eq!(learning, before);
+
+        learning.correction = None;
+        learning.restored_game_obligation = Some(RestoredGameObligation::Teaching);
+        let prepared = learning.prepared_availability(version, today);
+        assert_eq!(prepared.obligation, DailyObligation::None);
+        assert_eq!(prepared.scheduled_due, Some(today));
+
+        learning.restored_game_obligation = None;
+        learning.correction = Some(Correction {
+            lifecycle: CorrectionLifecycle::HumanTest,
+            answer_version: version,
+            clean_recalls: 0,
+            awaiting_introduction: false,
+            next_recall_day: None,
+            previous_move: None,
+        });
+        assert_eq!(
+            learning.prepared_availability(version, today).obligation,
+            DailyObligation::HumanCorrection,
+        );
+        assert_eq!(
+            learning.prepared_availability(version, today).scheduled_due,
+            None
+        );
+        assert_eq!(
+            learning
+                .prepared_availability(ContentVersion(2), today)
+                .scheduled_due,
+            Some(today),
         );
     }
 }
