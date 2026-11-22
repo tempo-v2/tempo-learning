@@ -42,8 +42,10 @@ needs a general-purpose utility or application-context object.
 Use [`DailyLearning`](src/daily_learning.rs) for the installed FSRS profile.
 `assess_game` accepts a validated Game Again and returns the model update,
 corrective obligation and preserved human Test cadence as one transition.
-`apply_game_again` is its model hook. `assess_test` uses the issued attempt's
-miss revision and time to advance a correction. `repair` accepts ungraded
+`apply_game_again` is its legacy model hook.
+`LearningPolicy::assess_test` is the installed profile's Test entry point. It
+uses the issued attempt's miss revision and time to apply the first assessment
+under the daily cadence. `repair` accepts ungraded
 guided work, and `Correction::remaining_recalls` projects the remaining recalls.
 Portable legacy requests enter through `DailyLearning::restore_portable` for
 compatibility without a new grade.
