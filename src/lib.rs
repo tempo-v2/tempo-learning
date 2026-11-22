@@ -79,7 +79,9 @@ pub use transition::Transition;
 mod test_support;
 
 mod game_review;
-pub use game_review::{Correction, GameReview, GameReviewEffect, RestoredGameObligation};
+pub use game_review::{
+    Correction, CorrectionLifecycle, GameReview, GameReviewEffect, RestoredGameObligation,
+};
 
 mod immediate_recall;
 pub use immediate_recall::ImmediateRecallMode;

@@ -1,8 +1,8 @@
 //! Opening lessons and scheduled tests use distinct learning transitions.
 use crate::{
-    AssessmentInput, AssessmentSource, Correction, LearningEffect, LearningError, LearningPolicy,
-    LearningState, RestoredGameObligation, SchedulerMemory, SchedulerSettings, Transition,
-    calendar::add_days, game_review::CORRECTIVE_RECALLS,
+    AssessmentInput, AssessmentSource, Correction, CorrectionLifecycle, LearningEffect,
+    LearningError, LearningPolicy, LearningState, RestoredGameObligation, SchedulerMemory,
+    SchedulerSettings, Transition, calendar::add_days, game_review::CORRECTIVE_RECALLS,
 };
 use fsrs::{DEFAULT_PARAMETERS, FSRS, MemoryState};
 use tempo_types::{ContentVersion, Grade, MissRevision, StudyTime};
@@ -96,11 +96,9 @@ impl DailyLearning {
         Ok(())
     }
 
-    /// Accept the first assessment of an ordinary daily Test using its saved issue time.
-    pub(crate) fn transition_test(
+    fn transition_scheduled_test(
         prior: &LearningState,
         input: &AssessmentInput,
-        version: ContentVersion,
         issued_at: StudyTime,
         assess: impl FnOnce() -> Result<Transition, LearningError>,
     ) -> Result<Transition, LearningError> {
@@ -124,6 +122,29 @@ impl DailyLearning {
         transition
             .state
             .record_assessed_test(issued_at, input.accepted_at)?;
+        Ok(transition)
+    }
+
+    /// Accept a Test from the legacy daily workflow, including its existing
+    /// Games obligations.
+    pub(crate) fn transition_test(
+        prior: &LearningState,
+        input: &AssessmentInput,
+        version: ContentVersion,
+        issued_at: StudyTime,
+        assess: impl FnOnce() -> Result<Transition, LearningError>,
+    ) -> Result<Transition, LearningError> {
+        let mut transition = Self::transition_scheduled_test(prior, input, issued_at, assess)?;
+        if transition.effect == LearningEffect::StalePositiveIgnored {
+            return Ok(transition);
+        }
+        if prior
+            .correction
+            .as_ref()
+            .is_some_and(|correction| correction.lifecycle == CorrectionLifecycle::HumanTest)
+        {
+            return Err(LearningError::InvalidLearningState);
+        }
         if let Some(RestoredGameObligation::Review(review)) =
             &mut transition.state.restored_game_obligation
         {
@@ -139,6 +160,7 @@ impl DailyLearning {
                     Self::start_correction(
                         &mut transition.state,
                         version,
+                        CorrectionLifecycle::LegacyGame,
                         correction.previous_move,
                         false,
                     )?;
@@ -168,7 +190,13 @@ impl DailyLearning {
         version: ContentVersion,
         previous_move: Option<String>,
     ) -> Result<Transition, LearningError> {
-        if !matches!(input.source, AssessmentSource::Game { .. }) || input.grade != Grade::Again {
+        if !matches!(input.source, AssessmentSource::Game { .. })
+            || input.grade != Grade::Again
+            || prior
+                .correction
+                .as_ref()
+                .is_some_and(|correction| correction.lifecycle == CorrectionLifecycle::HumanTest)
+        {
             return Err(LearningError::InvalidLearningState);
         }
         let mut transition = policy.apply_game_again(prior, input)?;
@@ -183,6 +211,7 @@ impl DailyLearning {
         Self::start_correction(
             &mut transition.state,
             version,
+            CorrectionLifecycle::LegacyGame,
             previous_move,
             awaiting_introduction,
         )?;
@@ -193,6 +222,7 @@ impl DailyLearning {
     fn start_correction(
         state: &mut LearningState,
         answer_version: ContentVersion,
+        lifecycle: CorrectionLifecycle,
         previous_move: Option<String>,
         awaiting_introduction: bool,
     ) -> Result<(), LearningError> {
@@ -203,6 +233,7 @@ impl DailyLearning {
             .ok_or(LearningError::CounterOverflow)?;
         state.correction = Some(Correction {
             answer_version,
+            lifecycle,
             clean_recalls: 0,
             next_recall_day: None,
             previous_move,
@@ -221,6 +252,7 @@ impl DailyLearning {
         if revision == prior.miss_revision
             && let Some(correction) = &mut state.correction
             && correction.answer_version == version
+            && correction.lifecycle == CorrectionLifecycle::LegacyGame
             && correction.next_recall_day.is_none()
         {
             check_time(prior, at)?;
@@ -228,6 +260,25 @@ impl DailyLearning {
             correction.awaiting_introduction = false;
         }
         Ok(state)
+    }
+
+    /// Close only the bound human correction. A stale or legacy binding
+    /// leaves Learning unchanged, including the previously accepted schedule.
+    pub fn complete_human_correction(
+        prior: &LearningState,
+        version: ContentVersion,
+        revision: MissRevision,
+    ) -> LearningState {
+        let mut state = prior.clone();
+        if revision == prior.miss_revision
+            && prior.correction.as_ref().is_some_and(|correction| {
+                correction.answer_version == version
+                    && correction.lifecycle == CorrectionLifecycle::HumanTest
+            })
+        {
+            state.correction = None;
+        }
+        state
     }
 }
 
@@ -269,6 +320,11 @@ impl LearningPolicy for DailyLearning {
                 !reviewed
                     || state.miss_revision.0 == 0
                     || correction.clean_recalls >= CORRECTIVE_RECALLS
+                    || (correction.lifecycle == CorrectionLifecycle::HumanTest
+                        && (correction.clean_recalls != 0
+                            || correction.next_recall_day.is_some()
+                            || correction.previous_move.is_some()
+                            || correction.awaiting_introduction))
                     || correction
                         .next_recall_day
                         .zip(state.last_review_at)
@@ -312,6 +368,27 @@ impl LearningPolicy for DailyLearning {
         Self::transition_test(prior, input, version, issued_at, || {
             self.assess_model(prior, input)
         })
+    }
+
+    fn assess_prepared_test(
+        &self,
+        prior: &LearningState,
+        input: &AssessmentInput,
+        version: ContentVersion,
+        issued_at: StudyTime,
+    ) -> Result<Transition, LearningError> {
+        let mut transition = Self::transition_scheduled_test(prior, input, issued_at, || {
+            self.assess_model(prior, input)
+        })?;
+        if input.grade == Grade::Again {
+            let state = &mut transition.state;
+            state.restored_game_obligation = None;
+            state.game_review = None;
+            state.game_teaching_relevance = false;
+            Self::start_correction(state, version, CorrectionLifecycle::HumanTest, None, false)?;
+            transition.effect = LearningEffect::MissRecorded;
+        }
+        Ok(transition)
     }
 
     fn apply_game_again(
@@ -512,6 +589,159 @@ mod tests {
         );
         assert_eq!(repaired.scheduled_reviews, miss.state.scheduled_reviews);
         assert_eq!(repaired.scheduler_memory, miss.state.scheduler_memory);
+    }
+
+    #[test]
+    fn prepared_test_opens_one_correction_and_exact_completion_keeps_its_schedule() {
+        let configured = DailyLearning::default();
+        let policy: &dyn LearningPolicy = &configured;
+        let version = ContentVersion(8);
+        let prior = DailyLearning::teach(&LearningState::default(), at(10)).unwrap();
+        let input = human(Grade::Again, 12, 0);
+        let miss = policy
+            .assess_prepared_test(&prior, &input, version, at(11))
+            .unwrap();
+        assert_eq!(miss.effect, LearningEffect::MissRecorded);
+        assert_eq!(miss.state.miss_revision, MissRevision(1));
+        assert_eq!(miss.state.first_introduced, prior.first_introduced);
+        assert_eq!(miss.state.last_graded_day, Some(StudyDay(12)));
+        assert_eq!(miss.state.last_review_at, Some(at(12)));
+        assert_eq!(miss.state.scheduled_reviews, 1);
+        assert_eq!(
+            miss.state
+                .daily_availability(version, StudyDay(12))
+                .obligation,
+            crate::DailyObligation::HumanCorrection,
+        );
+        assert_eq!(
+            miss.state
+                .daily_availability(version, StudyDay(12))
+                .corrective_recalls_remaining,
+            0,
+        );
+        assert_eq!(
+            miss.state
+                .daily_availability(ContentVersion(9), StudyDay(12))
+                .obligation,
+            crate::DailyObligation::None,
+        );
+        assert_eq!(
+            policy.assess_prepared_test(&miss.state, &input, version, at(11)),
+            Err(LearningError::DailyTestAlreadyAccepted),
+        );
+
+        for (version, revision) in [
+            (version, MissRevision(0)),
+            (ContentVersion(9), MissRevision(1)),
+        ] {
+            assert_eq!(
+                DailyLearning::complete_human_correction(&miss.state, version, revision),
+                miss.state
+            );
+        }
+        assert_eq!(
+            DailyLearning::repair(&miss.state, version, MissRevision(1), at(12)),
+            Ok(miss.state.clone())
+        );
+        let completed =
+            DailyLearning::complete_human_correction(&miss.state, version, MissRevision(1));
+        let mut scheduled = policy
+            .assess_test(&prior, &input, version, at(11))
+            .unwrap()
+            .state;
+        scheduled.miss_revision = MissRevision(1);
+        assert_eq!(completed, scheduled);
+        assert_eq!(
+            DailyLearning::complete_human_correction(&completed, version, MissRevision(1)),
+            completed
+        );
+        policy.validate_state(&completed).unwrap();
+        assert_eq!(
+            completed
+                .daily_availability(version, StudyDay(12))
+                .scheduled_due,
+            None
+        );
+        let later = completed.due.unwrap();
+        let clean = policy
+            .assess_prepared_test(
+                &completed,
+                &human(Grade::Good, later.0, 1),
+                version,
+                at(later.0),
+            )
+            .unwrap();
+        assert_eq!(clean.effect, LearningEffect::ScheduleAdvanced);
+        assert_eq!(clean.state.scheduled_reviews, 2);
+        assert!(clean.state.correction.is_none());
+    }
+
+    #[test]
+    fn prepared_human_miss_replaces_only_current_legacy_obligations() {
+        let configured = DailyLearning::default();
+        let policy: &dyn LearningPolicy = &configured;
+        let version = ContentVersion(8);
+        let taught = DailyLearning::teach(&LearningState::default(), at(10)).unwrap();
+        let game = AssessmentInput {
+            grade: Grade::Again,
+            accepted_at: at(11),
+            source: AssessmentSource::Game {
+                source: "pgn".into(),
+                game_id: "fixture".into(),
+                played_date: None,
+                started_at_ms: None,
+                ended_at_ms: None,
+            },
+        };
+        let legacy =
+            DailyLearning::assess_game(policy, &taught, &game, version, Some("e2e4".into()))
+                .unwrap()
+                .state;
+        assert_eq!(
+            legacy.correction.as_ref().unwrap().lifecycle,
+            CorrectionLifecycle::LegacyGame
+        );
+        assert_eq!(
+            DailyLearning::complete_human_correction(&legacy, version, MissRevision(1)),
+            legacy
+        );
+        let result = policy
+            .assess_prepared_test(&legacy, &human(Grade::Again, 12, 1), version, at(12))
+            .unwrap();
+        assert_eq!(result.state.miss_revision, MissRevision(2));
+        assert_eq!(result.state.scheduled_reviews, legacy.scheduled_reviews + 1);
+        assert_eq!(
+            result.state.correction.as_ref().unwrap().lifecycle,
+            CorrectionLifecycle::HumanTest
+        );
+        assert!(
+            result
+                .state
+                .correction
+                .as_ref()
+                .unwrap()
+                .previous_move
+                .is_none()
+        );
+        policy.validate_state(&result.state).unwrap();
+
+        let restored = LearningState {
+            restored_game_obligation: Some(RestoredGameObligation::Review(crate::GameReview {
+                answer_version: version,
+                occurred_by_ms: at(10).unix_ms + 1,
+                actionable_day: StudyDay(11),
+            })),
+            ..taught
+        };
+        let result = policy
+            .assess_prepared_test(&restored, &human(Grade::Again, 12, 0), version, at(12))
+            .unwrap();
+        assert!(result.state.restored_game_obligation.is_none());
+        assert_eq!(
+            result.state.correction.as_ref().unwrap().lifecycle,
+            CorrectionLifecycle::HumanTest
+        );
+        policy.validate_state(&result.state).unwrap();
     }
 
     #[test]

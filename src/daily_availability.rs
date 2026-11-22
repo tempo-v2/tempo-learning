@@ -1,11 +1,12 @@
 //! Learning facts used to select an activity for the current answer version.
-use crate::{LearningState, RestoredGameObligation};
+use crate::{CorrectionLifecycle, LearningState, RestoredGameObligation};
 use tempo_types::{ContentVersion, Grade, StudyDay};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DailyObligation {
     None,
     Repair,
+    HumanCorrection,
     CorrectiveRecall { day: StudyDay },
     RestoredTeaching,
     RestoredReview { day: StudyDay },
@@ -67,6 +68,9 @@ impl LearningState {
             .as_ref()
             .filter(|correction| correction.answer_version == answer_version);
         let obligation = match (correction, self.restored_game_obligation) {
+            (Some(correction), _) if correction.lifecycle == CorrectionLifecycle::HumanTest => {
+                DailyObligation::HumanCorrection
+            }
             (Some(correction), _) => match correction.next_recall_day {
                 Some(day) => DailyObligation::CorrectiveRecall { day },
                 None => DailyObligation::Repair,
@@ -80,7 +84,7 @@ impl LearningState {
             (None, None) => DailyObligation::None,
         };
         let action = match obligation {
-            DailyObligation::Repair => DailyAction::Repair,
+            DailyObligation::Repair | DailyObligation::HumanCorrection => DailyAction::Repair,
             DailyObligation::RestoredTeaching => DailyAction::Teach,
             DailyObligation::CorrectiveRecall { day } | DailyObligation::RestoredReview { day }
                 if may_test && day <= today =>
@@ -115,6 +119,7 @@ mod tests {
             first_introduced: Some(StudyDay(1)),
             due: Some(StudyDay(4)),
             correction: Some(Correction {
+                lifecycle: CorrectionLifecycle::LegacyGame,
                 answer_version: version,
                 clean_recalls: 1,
                 awaiting_introduction: false,
@@ -171,6 +176,7 @@ mod tests {
             DailyAction::RequestedTest
         );
         state.correction = Some(Correction {
+            lifecycle: CorrectionLifecycle::LegacyGame,
             answer_version: version,
             clean_recalls: 0,
             awaiting_introduction: true,
