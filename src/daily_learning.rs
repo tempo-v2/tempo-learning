@@ -291,6 +291,17 @@ impl LearningPolicy for DailyLearning {
         Ok(())
     }
 
+    fn apply(
+        &self,
+        prior: &LearningState,
+        input: &AssessmentInput,
+    ) -> Result<Transition, LearningError> {
+        if !matches!(input.source, AssessmentSource::Human { .. }) {
+            return Err(LearningError::InvalidLearningState);
+        }
+        self.assess_model(prior, input)
+    }
+
     fn assess_test(
         &self,
         prior: &LearningState,
