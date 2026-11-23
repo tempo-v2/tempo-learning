@@ -97,12 +97,12 @@ impl DailyLearning {
     }
 
     /// Accept the first assessment of an ordinary daily Test using its saved issue time.
-    pub fn assess_test(
-        policy: &dyn LearningPolicy,
+    pub(crate) fn transition_test(
         prior: &LearningState,
         input: &AssessmentInput,
         version: ContentVersion,
         issued_at: StudyTime,
+        assess: impl FnOnce() -> Result<Transition, LearningError>,
     ) -> Result<Transition, LearningError> {
         let AssessmentSource::Human {
             issued_miss_revision,
@@ -120,7 +120,7 @@ impl DailyLearning {
         if !prior.can_accept_daily_test(input.accepted_at.day) {
             return Err(LearningError::DailyTestAlreadyAccepted);
         }
-        let mut transition = policy.apply(prior, input)?;
+        let mut transition = assess()?;
         transition
             .state
             .record_assessed_test(issued_at, input.accepted_at)?;
@@ -302,6 +302,18 @@ impl LearningPolicy for DailyLearning {
         self.assess_model(prior, input)
     }
 
+    fn assess_test(
+        &self,
+        prior: &LearningState,
+        input: &AssessmentInput,
+        version: ContentVersion,
+        issued_at: StudyTime,
+    ) -> Result<Transition, LearningError> {
+        Self::transition_test(prior, input, version, issued_at, || {
+            self.assess_model(prior, input)
+        })
+    }
+
     fn apply_game_again(
         &self,
         prior: &LearningState,
@@ -411,4 +423,113 @@ fn decode_memory(memory: &SchedulerMemory) -> Result<MemoryState, LearningError>
         stability,
         difficulty,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{at, human};
+    use tempo_types::StudyDay;
+
+    #[test]
+    fn learning_lifecycle_test_enforces_cadence_without_using_attempt_identity() {
+        let daily = DailyLearning::default();
+        let policy: &dyn LearningPolicy = &daily;
+        let prior = DailyLearning::teach(&LearningState::default(), at(10)).unwrap();
+        let mut input = human(Grade::Good, 11, 0);
+        let result = policy
+            .assess_test(&prior, &input, ContentVersion(1), at(11))
+            .unwrap();
+        input.source = AssessmentSource::Human {
+            attempt_id: "renamed-attempt".into(),
+            issued_miss_revision: prior.miss_revision,
+        };
+        assert_eq!(
+            policy.assess_test(&prior, &input, ContentVersion(1), at(11)),
+            Ok(result.clone())
+        );
+        assert_eq!(result.effect, LearningEffect::ScheduleAdvanced);
+        assert_eq!(result.state.scheduled_reviews, 1);
+        assert_eq!(
+            policy.assess_test(&result.state, &input, ContentVersion(1), at(11)),
+            Err(LearningError::DailyTestAlreadyAccepted)
+        );
+    }
+
+    #[test]
+    fn learning_lifecycle_uses_exact_correction_revision_and_preserves_fsrs_on_repair() {
+        let daily = DailyLearning::default();
+        let policy: &dyn LearningPolicy = &daily;
+        let version = ContentVersion(1);
+        let prior = DailyLearning::teach(&LearningState::default(), at(10)).unwrap();
+        let mut game = AssessmentInput {
+            grade: Grade::Again,
+            accepted_at: at(11),
+            source: AssessmentSource::Game {
+                source: "pgn".into(),
+                game_id: "first".into(),
+                played_date: None,
+                started_at_ms: None,
+                ended_at_ms: None,
+            },
+        };
+        let miss = DailyLearning::assess_game(policy, &prior, &game, version, None).unwrap();
+        game.source = AssessmentSource::Game {
+            source: "renamed-source".into(),
+            game_id: "renamed-game".into(),
+            played_date: Some("2026-11-20".into()),
+            started_at_ms: Some(1),
+            ended_at_ms: Some(2),
+        };
+        assert_eq!(
+            DailyLearning::assess_game(policy, &prior, &game, version, None),
+            Ok(miss.clone())
+        );
+        assert_eq!(miss.effect, LearningEffect::MissRecorded);
+        assert_eq!(miss.state.miss_revision, MissRevision(1));
+
+        let stale = policy.assess_test(&miss.state, &human(Grade::Good, 12, 0), version, at(10));
+        assert_eq!(
+            stale,
+            Ok(Transition {
+                state: miss.state.clone(),
+                effect: LearningEffect::StalePositiveIgnored,
+            })
+        );
+        assert_eq!(
+            DailyLearning::repair(&miss.state, version, MissRevision(0), at(12)).unwrap(),
+            miss.state
+        );
+        assert_eq!(
+            DailyLearning::repair(&miss.state, ContentVersion(2), MissRevision(1), at(12)).unwrap(),
+            miss.state
+        );
+        let repaired =
+            DailyLearning::repair(&miss.state, version, MissRevision(1), at(12)).unwrap();
+        assert_eq!(
+            repaired.correction.unwrap().next_recall_day,
+            Some(StudyDay(13))
+        );
+        assert_eq!(repaired.scheduled_reviews, miss.state.scheduled_reviews);
+        assert_eq!(repaired.scheduler_memory, miss.state.scheduler_memory);
+    }
+
+    #[test]
+    fn learning_lifecycle_distinguishes_ungraded_entry_and_changed_answer() {
+        let prior = LearningState::default();
+        let taught = DailyLearning::teach(&prior, at(10)).unwrap();
+        let captured = DailyLearning::introduce_capture(&prior, at(10)).unwrap();
+        assert_eq!(taught.due, Some(StudyDay(11)));
+        assert_eq!(captured.due, Some(StudyDay(10)));
+        for introduction in [taught, captured] {
+            assert_eq!(introduction.first_introduced, Some(StudyDay(10)));
+            assert_eq!(introduction.scheduled_reviews, 0);
+            assert!(introduction.scheduler_memory.is_none());
+            let changed = DailyLearning::changed_answer(&introduction);
+            assert_eq!(changed.first_introduced, introduction.first_introduced);
+            assert!(!changed.introduced);
+            assert_eq!(changed.due, None);
+            assert!(changed.scheduler_memory.is_none());
+        }
+    }
 }

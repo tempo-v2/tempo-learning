@@ -1,5 +1,8 @@
 //! The application-facing boundary for learning decisions and restore validation.
-use crate::{AssessmentInput, LearningError, LearningState, SchedulerSettings, Transition};
+use crate::{
+    AssessmentInput, DailyLearning, LearningError, LearningState, SchedulerSettings, Transition,
+};
+use tempo_types::{ContentVersion, StudyTime};
 
 /// Depend on this trait when application code needs learning behavior. It accepts
 /// domain values and returns proposed values, keeping persistence and replay
@@ -13,13 +16,27 @@ pub trait LearningPolicy {
     fn settings(&self) -> SchedulerSettings;
     /// Check a restored state and its algorithm memory without applying a fake grade.
     fn validate_state(&self, state: &LearningState) -> Result<(), LearningError>;
-    /// Propose a transition without mutating prior state or recording acceptance.
-    /// Duplicate event protection belongs to the surrounding application transaction.
-    fn apply(
+    /// Propose the first assessment of an issued daily Test, including cadence.
+    fn assess_test(
         &self,
         prior: &LearningState,
         input: &AssessmentInput,
-    ) -> Result<Transition, LearningError>;
+        version: ContentVersion,
+        issued_at: StudyTime,
+    ) -> Result<Transition, LearningError> {
+        DailyLearning::transition_test(prior, input, version, issued_at, || {
+            self.apply(prior, input)
+        })
+    }
+
+    /// Historical assessment policy used by the standalone fixture workflow.
+    fn apply(
+        &self,
+        _prior: &LearningState,
+        _input: &AssessmentInput,
+    ) -> Result<Transition, LearningError> {
+        Err(LearningError::InvalidLearningState)
+    }
     /// Model-only hook for [`crate::DailyLearning::assess_game`].
     /// The production caller uses that complete transition to retain correction and cadence.
     fn apply_game_again(
