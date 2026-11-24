@@ -380,11 +380,23 @@ impl LearningPolicy for DailyLearning {
         let mut transition = Self::transition_scheduled_test(prior, input, issued_at, || {
             self.assess_model(prior, input)
         })?;
+        if transition.effect == LearningEffect::StalePositiveIgnored {
+            return Ok(transition);
+        }
+        // Accepted prepared Tests retire open legacy obligations without
+        // changing the historical assessments that produced them.
+        let state = &mut transition.state;
+        state.restored_game_obligation = None;
+        state.game_review = None;
+        state.game_teaching_relevance = false;
+        if state
+            .correction
+            .as_ref()
+            .is_some_and(|correction| correction.lifecycle == CorrectionLifecycle::LegacyGame)
+        {
+            state.correction = None;
+        }
         if input.grade == Grade::Again {
-            let state = &mut transition.state;
-            state.restored_game_obligation = None;
-            state.game_review = None;
-            state.game_teaching_relevance = false;
             Self::start_correction(state, version, CorrectionLifecycle::HumanTest, None, false)?;
             transition.effect = LearningEffect::MissRecorded;
         }
@@ -674,6 +686,107 @@ mod tests {
         assert_eq!(clean.effect, LearningEffect::ScheduleAdvanced);
         assert_eq!(clean.state.scheduled_reviews, 2);
         assert!(clean.state.correction.is_none());
+    }
+
+    #[test]
+    fn prepared_good_retires_repaired_legacy_recall() {
+        let policy = DailyLearning::default();
+        let version = ContentVersion(8);
+        let taught = DailyLearning::teach(&LearningState::default(), at(10)).unwrap();
+        let game = AssessmentInput {
+            grade: Grade::Again,
+            accepted_at: at(11),
+            source: AssessmentSource::Game {
+                source: "pgn".into(),
+                game_id: "fixture".into(),
+                played_date: None,
+                started_at_ms: None,
+                ended_at_ms: None,
+            },
+        };
+        let miss = DailyLearning::assess_game(&policy, &taught, &game, version, None).unwrap();
+        let repaired =
+            DailyLearning::repair(&miss.state, version, MissRevision(1), at(11)).unwrap();
+        assert_eq!(
+            repaired.correction.as_ref().unwrap().next_recall_day,
+            Some(StudyDay(12))
+        );
+        let day = repaired.due.unwrap().max(StudyDay(12));
+        assert_eq!(
+            policy
+                .assess_prepared_test(&repaired, &human(Grade::Good, day.0, 0), version, at(day.0))
+                .unwrap(),
+            Transition {
+                state: repaired.clone(),
+                effect: LearningEffect::StalePositiveIgnored,
+            }
+        );
+        let ordinary = LearningState {
+            correction: None,
+            ..repaired.clone()
+        };
+        assert_prepared_good_continues(&policy, version, &repaired, &ordinary, day);
+    }
+
+    #[test]
+    fn prepared_good_retires_restored_review_older_than_issue() {
+        let policy = DailyLearning::default();
+        let version = ContentVersion(8);
+        let taught = DailyLearning::teach(&LearningState::default(), at(10)).unwrap();
+        let mut restored = LearningState {
+            game_review: Some(crate::GameReview {
+                answer_version: version,
+                occurred_by_ms: at(10).unix_ms + 1,
+                actionable_day: StudyDay(11),
+            }),
+            ..taught.clone()
+        };
+        DailyLearning::restore_portable(&mut restored, version).unwrap();
+        assert!(restored.restored_game_obligation.is_some());
+        assert_prepared_good_continues(&policy, version, &restored, &taught, StudyDay(11));
+    }
+
+    fn assert_prepared_good_continues(
+        policy: &DailyLearning,
+        version: ContentVersion,
+        prior: &LearningState,
+        ordinary: &LearningState,
+        day: StudyDay,
+    ) {
+        policy.validate_state(prior).unwrap();
+        assert_eq!(
+            prior.prepared_availability(version, day).scheduled_due,
+            prior.due
+        );
+        let input = human(Grade::Good, day.0, prior.miss_revision.0);
+        let accepted = policy
+            .assess_prepared_test(prior, &input, version, at(day.0))
+            .unwrap();
+        policy.validate_state(&accepted.state).unwrap();
+        assert_eq!(
+            accepted,
+            policy
+                .assess_prepared_test(ordinary, &input, version, at(day.0))
+                .unwrap()
+        );
+        let due = accepted.state.due.unwrap();
+        assert_eq!(
+            accepted
+                .state
+                .prepared_availability(version, due)
+                .scheduled_due,
+            Some(due)
+        );
+        let next = policy
+            .assess_prepared_test(
+                &accepted.state,
+                &human(Grade::Good, due.0, prior.miss_revision.0),
+                version,
+                at(due.0),
+            )
+            .unwrap();
+        policy.validate_state(&next.state).unwrap();
+        assert_eq!(next.state.scheduled_reviews, prior.scheduled_reviews + 2);
     }
 
     #[test]
