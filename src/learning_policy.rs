@@ -29,6 +29,18 @@ pub trait LearningPolicy {
         })
     }
 
+    /// Propose the first assessment of a prepared human Test. A first miss
+    /// opens one exact correction, which has no separate recall schedule.
+    fn assess_prepared_test(
+        &self,
+        _prior: &LearningState,
+        _input: &AssessmentInput,
+        _version: ContentVersion,
+        _issued_at: StudyTime,
+    ) -> Result<Transition, LearningError> {
+        Err(LearningError::InvalidLearningState)
+    }
+
     /// Historical assessment policy used by the standalone fixture workflow.
     fn apply(
         &self,

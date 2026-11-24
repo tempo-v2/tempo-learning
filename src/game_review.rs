@@ -21,11 +21,29 @@ pub enum RestoredGameObligation {
 
 pub(crate) const CORRECTIVE_RECALLS: u8 = 3;
 
-/// The active answer version's corrective sequence. A missing recall day
-/// means the learner still needs to reproduce the shown move.
+/// Distinguishes the retained human correction from the previously saved
+/// Games repair and recall sequence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectionLifecycle {
+    #[default]
+    LegacyGame,
+    HumanTest,
+}
+
+impl CorrectionLifecycle {
+    fn is_legacy(&self) -> bool {
+        *self == Self::LegacyGame
+    }
+}
+
+/// The active answer version’s pending correction. Legacy records may also
+/// carry a recall sequence after the guided repair.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Correction {
     pub answer_version: ContentVersion,
+    #[serde(default, skip_serializing_if = "CorrectionLifecycle::is_legacy")]
+    pub lifecycle: CorrectionLifecycle,
     pub clean_recalls: u8,
     pub awaiting_introduction: bool,
     pub next_recall_day: Option<StudyDay>,
@@ -34,7 +52,12 @@ pub struct Correction {
 
 impl Correction {
     pub fn remaining_recalls(&self) -> u8 {
-        CORRECTIVE_RECALLS.saturating_sub(self.clean_recalls)
+        match self.lifecycle {
+            CorrectionLifecycle::LegacyGame => {
+                CORRECTIVE_RECALLS.saturating_sub(self.clean_recalls)
+            }
+            CorrectionLifecycle::HumanTest => 0,
+        }
     }
 }
 
